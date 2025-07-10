@@ -1,3 +1,22 @@
+# Modifications
+NAV2 was removed from the launch file, but assumes it is launched elsewhere. Removing NAV2 allows us to start/stop fronteier exploration, but keep NAV2 running.
+
+slamtoolbox was also removed. However automapper expects an occupancy grid.
+
+## New features
+Subscriptions:
+
+map_topic `default_value='/projected_map'`
+
+pose_topic `default_value='/dlio/odom_node/pose'`
+
+Note pose_topic is of the type `PoseStamped` and gets converted to `PoseStampedCovariance`
+
+Save map is now accomplished by `nav2_map_server`
+
+
+# Original ReadMe below
+
 <h3 align="center">auto_mapper</h3>
 
   <p align="center">
