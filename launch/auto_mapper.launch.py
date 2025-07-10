@@ -1,83 +1,58 @@
-import launch_ros
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import Node, SetRemap
-from launch_ros.substitutions import FindPackageShare
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    declared_arguments = [
-        DeclareLaunchArgument(
-            "map_path",
-            description="Map file path",
-        ),
-        DeclareLaunchArgument(
-            "is_sim",
-            default_value="true",
-        )]
-
-    robot_nodes = create_robot_node()
-
-    return LaunchDescription(declared_arguments +
-                             robot_nodes
-                             )
-
-
-def create_slam_toolbox_node(package_name: str, is_sim: LaunchConfiguration, map_path: LaunchConfiguration) -> object:
-    launch_file_path = PathJoinSubstitution(
-        [FindPackageShare(package_name), 'launch', 'online_async_launch.py'])
-    params_file = PathJoinSubstitution(
-        [FindPackageShare(package_name), "config", "mapper_params_online_async.yaml"])
-    return IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(launch_file_path),
-        launch_arguments={'use_sim_time': is_sim, 'slam_params_file': params_file, 'map_file_name': map_path}.items()
+    # Declare the launch arguments
+    map_path_arg = DeclareLaunchArgument(
+        "map_path",
+        default_value='/Humble/maps',
+        description="Map file path",
     )
 
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='true',
+        description='Use simulation (Gazebo) clock if true'
+    )
 
-def create_robot_node() -> list:
-    """
+    map_topic_arg = DeclareLaunchArgument(
+        'map_topic',
+        default_value='/projected_map',
+        description='Topic for the map that auto_mapper will subscribe to.'
+    )
 
-    :rtype: list
-    """
+    pose_topic_arg = DeclareLaunchArgument(
+        'pose_topic',
+        default_value='/dlio/odom_node/pose',
+        description='Topic for the robot pose that auto_mapper will subscribe to.'
+    )
+
+    # Get the launch configurations
     map_path = LaunchConfiguration("map_path")
-    is_sim = LaunchConfiguration('is_sim')
-    package_name = 'auto_mapper'
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    map_topic = LaunchConfiguration('map_topic')
+    pose_topic = LaunchConfiguration('pose_topic')
 
-    auto_mapper = Node(
-        package=package_name,
+    auto_mapper_node = Node(
+        package="auto_mapper",
         executable="auto_mapper",
         name="auto_mapper",
         parameters=[
-            {"map_path": map_path}
-        ]
+            {"map_path": map_path},
+            {'use_sim_time': use_sim_time},
+            {'map_topic': map_topic},
+            {'pose_topic': pose_topic}
+        ],
+        output="screen"
     )
 
-    navigation_launch_file_path = PathJoinSubstitution(
-        [FindPackageShare(package_name), 'launch', 'bringup_launch.py'])
-    nav2_bringup = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(navigation_launch_file_path),
-        launch_arguments={'map': map_path, 'use_sim_time': is_sim, 'package_name': package_name}.items()
-    )
-    package_share = FindPackageShare(package_name)
-    rviz_config_file = PathJoinSubstitution(
-        [package_share, "rviz", "config.rviz"]
-    )
-    return [
-        GroupAction(
-            actions=[
-                # SetRemap(src='/cmd_vel', dst='/diff_drive_controller/cmd_vel_unstamped'),
-                create_slam_toolbox_node(package_name, is_sim, map_path),
-                nav2_bringup,
-                auto_mapper,
-                Node(
-                    package="rviz2",
-                    executable="rviz2",
-                    name="rviz2",
-                    output="log",
-                    arguments=["-d", rviz_config_file]
-                )
-            ]
-        )
-    ]
+    return LaunchDescription([
+        map_path_arg,
+        use_sim_time_arg,
+        map_topic_arg,
+        pose_topic_arg,
+        auto_mapper_node
+    ])
