@@ -1,48 +1,35 @@
 //
-// Created by omar on 2/5/24.
+// Edited by gglapell on 7/10/25.
 //
-//
-// Created by omar on 1/30/24.
-//
+
 #include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
 #include <array>
-#include <filesystem>
-#include <slam_toolbox/srv/detail/save_map__struct.hpp>
 #include <fstream>
 
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/msg/range.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
+#include "nav2_msgs/srv/save_map.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
-#include "map_msgs/msg/occupancy_grid_update.hpp"
 #include "nav2_costmap_2d/costmap_2d.hpp"
 #include "nav2_costmap_2d/cost_values.hpp"
-#include "nav2_util/occ_grid_values.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 #include "std_msgs/std_msgs/msg/color_rgba.hpp"
-#include "nav2_map_server/map_mode.hpp"
-#include "nav2_map_server/map_saver.hpp"
-#include "slam_toolbox/srv/serialize_pose_graph.hpp"
-#include "geometry_msgs/msg/twist.hpp"
-#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 
 using std::placeholders::_1;
-using sensor_msgs::msg::Range;
 using geometry_msgs::msg::PoseWithCovarianceStamped;
 using geometry_msgs::msg::PoseStamped;
 using geometry_msgs::msg::Point;
 using nav_msgs::msg::OccupancyGrid;
 using nav2_msgs::action::NavigateToPose;
-using map_msgs::msg::OccupancyGridUpdate;
 using visualization_msgs::msg::MarkerArray;
 using visualization_msgs::msg::Marker;
 using std_msgs::msg::ColorRGBA;
@@ -57,8 +44,6 @@ using namespace std::chrono_literals;
 using namespace std;
 using namespace rclcpp;
 using namespace rclcpp_action;
-using namespace nav2_map_server;
-using namespace slam_toolbox;
 using std::chrono::steady_clock;
 
 using NavigateToPose = nav2_msgs::action::NavigateToPose;
@@ -70,11 +55,17 @@ public:
             : Node("auto_mapper") {
         RCLCPP_INFO(get_logger(), "AutoMapper started...");
 
-        poseSubscription_ = create_subscription<PoseWithCovarianceStamped>(
-                "/pose", 10, bind(&AutoMapper::poseTopicCallback, this, _1));
+        // Declare and get parameters
+        declare_parameter<string>("map_topic", "/map");
+        declare_parameter<string>("pose_topic", "/pose");
+        get_parameter("map_topic", mapTopic_);
+        get_parameter("pose_topic", poseTopic_);
+
+        poseSubscription_ = create_subscription<PoseStamped>(
+                poseTopic_, 10, bind(&AutoMapper::poseTopicCallback, this, _1));
 
         mapSubscription_ = create_subscription<OccupancyGrid>(
-                "/map", 10, bind(&AutoMapper::updateFullMap, this, _1));
+                mapTopic_, 10, bind(&AutoMapper::updateFullMap, this, _1));
 
         markerArrayPublisher_ = create_publisher<MarkerArray>("/frontiers", 10);
         poseNavigator_ = rclcpp_action::create_client<NavigateToPose>(
@@ -99,9 +90,11 @@ private:
     bool isExploring_ = false;
     int markerId_;
     string mapPath_;
+    string mapTopic_;
+    string poseTopic_;
 
 
-    Subscription<PoseWithCovarianceStamped>::SharedPtr poseSubscription_;
+    Subscription<PoseStamped>::SharedPtr poseSubscription_;
     PoseWithCovarianceStamped::UniquePtr pose_;
 
     array<unsigned char, 256> costTranslationTable_ = initTranslationTable();
@@ -130,13 +123,26 @@ private:
         string getKey() const{to_string(centroid.x) + "," + to_string(centroid.y);}
     };
 
-    void poseTopicCallback(PoseWithCovarianceStamped::UniquePtr pose) {
-        pose_ = move(pose);
-        RCLCPP_INFO(get_logger(), "poseTopicCallback...");
+    void poseTopicCallback(PoseStamped::UniquePtr msg) {
+        if (pose_ == nullptr) {
+            RCLCPP_INFO(get_logger(), "Initial robot pose received on topic '%s'.", poseTopic_.c_str());
+        }
+        pose_ = std::make_unique<PoseWithCovarianceStamped>();
+        pose_->header = msg->header;
+        pose_->pose.pose = msg->pose;
+        // Covariance is not provided by PoseStamped, so it remains default-initialized (zeros)
     }
 
     void updateFullMap(OccupancyGrid::UniquePtr occupancyGrid) {
-        if (pose_ == nullptr) { return; }
+        if (pose_ == nullptr) {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                5000, // Throttle to every 5 seconds
+                "Map received on topic '%s', but waiting for initial pose on topic '%s' to begin exploring.",
+                mapTopic_.c_str(), poseTopic_.c_str());
+            return;
+        }
         RCLCPP_INFO(get_logger(), "updateFullMap...");
         const auto occupancyGridInfo = occupancyGrid->info;
         unsigned int size_in_cells_x = occupancyGridInfo.width;
@@ -273,18 +279,22 @@ private:
     }
 
     void saveMap() {
-        auto mapSerializer = create_client<slam_toolbox::srv::SerializePoseGraph>(
-                "/slam_toolbox/serialize_map");
-        auto serializePoseGraphRequest =
-                std::make_shared<slam_toolbox::srv::SerializePoseGraph::Request>();
-        serializePoseGraphRequest->filename = mapPath_;
-        auto serializePoseResult = mapSerializer->async_send_request(serializePoseGraphRequest);
+        RCLCPP_INFO(get_logger(), "Requesting to save map using nav2_map_server...");
+        auto map_saver_cli = create_client<nav2_msgs::srv::SaveMap>("/map_server/save_map");
 
-        auto map_saver = create_client<slam_toolbox::srv::SaveMap>(
-                "/slam_toolbox/save_map");
-        auto saveMapRequest = std::make_shared<slam_toolbox::srv::SaveMap::Request>();
-        saveMapRequest->name.data = mapPath_;
-        auto saveMapResult = map_saver->async_send_request(saveMapRequest);
+        if (!map_saver_cli->wait_for_service(2s)) {
+            RCLCPP_ERROR(get_logger(), "nav2_map_server's save_map service not available.");
+            return;
+        }
+
+        auto request = std::make_shared<nav2_msgs::srv::SaveMap::Request>();
+        request->map_topic = mapTopic_;
+        request->map_url = mapPath_;
+        request->image_format = "pgm";
+        request->map_mode = "trinary";
+
+        map_saver_cli->async_send_request(request);
+        RCLCPP_INFO(get_logger(), "Save map request sent for map at %s", mapPath_.c_str());
     }
 
     vector<unsigned int> nhood8(unsigned int idx) {
